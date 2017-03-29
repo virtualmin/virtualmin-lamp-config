@@ -3,7 +3,13 @@
 use strict;
 use warnings;
 no warnings qw(once);
+use 5.010_001; # Version shipped with CentOS 6. Nothing older.
+
 use Term::ANSIColor qw(:constants);
+
+# Guesstimate our terminal size.
+my ($lines, $cols) = `stty size`=~/(\d+)\s+(\d+)/?($1,$2):(25,80);
+unless ($cols <= 80) { $cols = 80 };  # Don't let it get too big.
 
 # globals
 our (%gconfig, %uconfig, %miniserv, %uminiserv);
