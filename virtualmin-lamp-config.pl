@@ -1,8 +1,13 @@
 #!/usr/bin/perl
 # Version 6.0.0
-#use strict;
+use strict;
 use warnings;
+no warnings qw(once);
 use Term::ANSIColor qw(:constants);
+
+# globals
+our (%gconfig, %uconfig, %miniserv, %uminiserv);
+our ($root_directory, $config_directory);
 
 $|=1;
 
@@ -11,7 +16,7 @@ my $no_acl_check++;
 $ENV{'WEBMIN_CONFIG'} ||= "/etc/webmin";
 $ENV{'WEBMIN_VAR'} ||= "/var/webmin";
 $ENV{'MINISERV_CONFIG'} = $ENV{'WEBMIN_CONFIG'}."/miniserv.conf";
-$trust_unknown_referers = 1;
+our $trust_unknown_referers = 1;
 open(my $CONF, "<", "$ENV{'WEBMIN_CONFIG'}/miniserv.conf") ||
 die RED, "Failed to open miniserv.conf", RESET;
 my $root;
@@ -29,7 +34,9 @@ push(@INC, $root);
 eval "use WebminCore";
 init_config();
 
-$main::error_must_die = 1;
+our $error_must_die = 1;
+our $file_cache;
+
 # Set the Webmin theme and turn on full logging
 eval { # try
 	print "Setting Webmin theme\n";
@@ -111,8 +118,7 @@ eval {
 				"$maptype:$postetc/bcc");
 	}
 	postfix::ensure_map("sender_bcc_maps");
-	postfix::regenerate_bcc_table()
-		if (defined(postfix::regenerate_bcc_table));
+	postfix::regenerate_bcc_table() if (defined(postfix::regenerate_bcc_table()));
 
 	# Setup sender dependent map
 	if ($postfix::postfix_version >= 2.7) {
@@ -127,8 +133,7 @@ eval {
 				"sender_dependent_default_transport_maps");
 	}
 
-	$wrapper = "/opt/csw/bin/procmail-wrapper";
-	$wrapper = "/usr/bin/procmail-wrapper" if (!-r $wrapper);
+	my $wrapper = "/usr/bin/procmail-wrapper";
 	postfix::set_current_value("mailbox_command",
 			"$wrapper -o -a \$DOMAIN -d \$LOGNAME", 1);
 	postfix::set_current_value("home_mailbox", "Maildir/", 1);
@@ -138,8 +143,8 @@ eval {
 	postfix::set_current_value("smtpd_sasl_security_options", "noanonymous", 1);
 	postfix::set_current_value("broken_sasl_auth_clients", "yes", 1);
 	postfix::set_current_value("smtpd_recipient_restrictions", "permit_mynetworks permit_sasl_authenticated reject_unauth_destination", 1);
-	$mydest = postfix::get_current_value("mydestination");
-	$myhost = get_system_hostname();
+	my $mydest = postfix::get_current_value("mydestination");
+	my $myhost = get_system_hostname();
 	if ($mydest !~ /\Q$myhost\E/) {
 		postfix::set_current_value("mydestination",
 				$mydest.", ".$myhost, 1);
@@ -152,8 +157,8 @@ eval {
 	postfix::set_current_value("allow_percent_hack", "no");
 
 	# And master.cf
-	$master = postfix::get_master_config();
-	($smtp) = grep { $_->{'name'} eq 'smtp' && $_->{'enabled'} } @$master;
+	my $master = postfix::get_master_config();
+	my ($smtp) = grep { $_->{'name'} eq 'smtp' && $_->{'enabled'} } @$master;
 	$smtp || die "Failed to find SMTP postfix service!";
 	if ($smtp->{'command'} !~ /smtpd_sasl_auth_enable/) {
 		$smtp->{'command'} .= " -o smtpd_sasl_auth_enable=yes";
@@ -161,7 +166,7 @@ eval {
 	}
 
 	# Add submission entry, if missing
-	($submission) = grep { $_->{'name'} eq 'submission' && $_->{'enabled'} } @$master;
+	my ($submission) = grep { $_->{'name'} eq 'submission' && $_->{'enabled'} } @$master;
 	if (!$submission) {
 		$submission = { %$smtp };
 		$submission->{'name'} = 'submission';
@@ -175,12 +180,12 @@ eval {
 	$postfix::postfix_version =
 		backquote_command("$postfix::config{'postfix_config_command'} -h mail_version");
 	$postfix::postfix_version =~ s/\r|\n//g;
-	open_tempfile(VER, ">$postfix::module_config_directory/version");
-	print_tempfile(VER, $postfix::postfix_version,"\n");
-	close_tempfile(VER);
+	open_tempfile(my $VER, ">$postfix::module_config_directory/version");
+	print_tempfile($VER, $postfix::postfix_version,"\n");
+	close_tempfile($VER);
 
 	# Force alias map rebuild if missing
-	&postfix::regenerate_aliases();
+	postfix::regenerate_aliases();
 	1;
 }
 or do {
@@ -244,12 +249,12 @@ eval {
 	system("killall -9 sendmail >/dev/null 2>&1");
 	system("newaliases");
 	if (!postfix::is_postfix_running()) {
-		$err = postfix::start_postfix();
+		my $err = postfix::start_postfix();
 		print STDERR "Failed to start Postfix!\n" if ($err);
 	}
 
 	# Make sure freshclam is not disabled
-	$fcconf = "/etc/sysconfig/freshclam";
+	my $fcconf = "/etc/sysconfig/freshclam";
 	if (-r $fcconf) {
 		my $lref = &read_file_lines($fcconf);
 		foreach my $l (@$lref) {
@@ -267,62 +272,62 @@ or do {
 
 eval {
 	print "Configuring Dovecot for POP3 and IMAP\n";
-	&foreign_require("dovecot", "dovecot-lib.pl");
+	foreign_require("dovecot", "dovecot-lib.pl");
 
 	# Work out dirs for control and index files
-	&foreign_require("mount", "mount-lib.pl");
-	$indexes = "";
-	($homedir) = &mount::filesystem_for_dir("/home");
-	($vardir) = &mount::filesystem_for_dir("/var");
+	foreign_require("mount", "mount-lib.pl");
+	my $indexes = "";
+	my ($homedir) = mount::filesystem_for_dir("/home");
+	my ($vardir) = mount::filesystem_for_dir("/var");
 	if ($homedir ne $vardir) {
 		if (!-d "/var/lib") {
-			&make_dir("/var/lib", 0755);
+			make_dir("/var/lib", 0755);
 		}
 		if (!-d "/var/lib/dovecot-virtualmin") {
-			&make_dir("/var/lib/dovecot-virtualmin", 0755);
+			make_dir("/var/lib/dovecot-virtualmin", 0755);
 		}
-		&make_dir("/var/lib/dovecot-virtualmin/index", 0777);
-		&make_dir("/var/lib/dovecot-virtualmin/control", 0777);
+		make_dir("/var/lib/dovecot-virtualmin/index", 0777);
+		make_dir("/var/lib/dovecot-virtualmin/control", 0777);
 		$indexes = ":INDEX=/var/lib/dovecot-virtualmin/index/%u".
 			":CONTROL=/var/lib/dovecot-virtualmin/control/%u";
 	}
 
-	$conf = &dovecot::get_config();
-	if (&dovecot::get_dovecot_version() >= 2) {
-		&dovecot::save_directive($conf, "protocols",
+	my $conf = dovecot::get_config();
+	if (dovecot::get_dovecot_version() >= 2) {
+		dovecot::save_directive($conf, "protocols",
 				"imap pop3");
 	}
 	else {
-		&dovecot::save_directive($conf, "protocols",
+		dovecot::save_directive($conf, "protocols",
 				"imap imaps pop3 pop3s");
 	}
-	if (&dovecot::find("mail_location", $conf, 2)) {
-		&dovecot::save_directive($conf, "mail_location",
+	if (dovecot::find("mail_location", $conf, 2)) {
+		dovecot::save_directive($conf, "mail_location",
 				"maildir:~/Maildir".$indexes);
 	}
 	else {
-		&dovecot::save_directive($conf, "default_mail_env",
+		dovecot::save_directive($conf, "default_mail_env",
 				"maildir:~/Maildir".$indexes);
 	}
-	if (&dovecot::find("pop3_uidl_format", $conf, 2)) {
-		&dovecot::save_directive($conf, "pop3_uidl_format",
+	if (dovecot::find("pop3_uidl_format", $conf, 2)) {
+		dovecot::save_directive($conf, "pop3_uidl_format",
 				"%08Xu%08Xv");
 	}
-	elsif (&dovecot::find("pop3_uidl_format", $conf, 2, "pop3")) {
-		&dovecot::save_directive($conf, "pop3_uidl_format",
+	elsif (dovecot::find("pop3_uidl_format", $conf, 2, "pop3")) {
+		dovecot::save_directive($conf, "pop3_uidl_format",
 				"%08Xu%08Xv", "pop3");
 	}
-	&dovecot::save_directive($conf, "disable_plaintext_auth", "no");
-	$am = &dovecot::find_value("auth_mechanisms", $conf, 2);
+	dovecot::save_directive($conf, "disable_plaintext_auth", "no");
+	my $am = dovecot::find_value("auth_mechanisms", $conf, 2);
 	if ($am && $am !~ /login/) {
 		$am .= " login";
 		&dovecot::save_directive($conf, "auth_mechanisms", $am);
 	}
-	&flush_file_lines();
+	flush_file_lines();
 	print "Enabling Dovecot POP3 and IMAP servers\n";
-	&init::enable_at_boot("dovecot");
-	if (!&dovecot::is_dovecot_running()) {
-		$err = &dovecot::start_dovecot();
+	init::enable_at_boot("dovecot");
+	if (!dovecot::is_dovecot_running()) {
+		my $err = dovecot::start_dovecot();
 		print STDERR "Failed to start Dovecot POP3/IMAP server!\n" if ($err);
 	}
 	1;
@@ -333,46 +338,46 @@ or do {
 
 # ProFTPd
 # Enable SFTP
-eval {
-	print "Enabling SFTP on port 2222 in ProFTPd\n";
-	my $fh;
-	# This is crazy. Need to use Webmin to lookup location of proftpd.conf or conf.d,
-	# but, it's not up to date or accurate for several systems, so need to fix.
-	if ( -d '/etc/proftpd/conf.d' ) { open ($fh, '>', '/etc/proftpd/conf.d/sftpd.conf'); }
-	elsif ( -f '/etc/proftd/proftpd.conf' ) { open ($fh, '>>', '/etc/proftpd/proftpd.conf'); }
-	elsif ( -f '/etc/proftpd.conf' ) { open(my $fh, '>>', '/etc/proftpd.conf'); }
-	elsif ( -f '/usr/local/etc/proftpd.conf' ) { open ($fh, '>>', '/usr/local/etc/proftpd.conf'); }
-	else { die "Could not find a proftpd configuration to edit.\n"; }
-	print $fh "\nLoadModule mod_sftp.c\n";
-	print $fh "<IfModule mod_sftp.c>\n\n";
-	print $fh "    SFTPEngine on\n";
-	print $fh "    Port 2222\n";
-	print $fh "    SFTPLog /var/log/proftpd/sftp.log\n\n";
-	print $fh "    SFTPHostKey /etc/ssh/ssh_host_rsa_key\n";
-	print $fh "    SFTPHostKey /etc/ssh/ssh_host_dsa_key\n\n";
-	print $fh "    SFTPAuthorizedUserKeys file:~/.sftp/authorized_keys\n\n";
-	print $fh "    SFTPCompression delayed\n\n";
-	print $fh "</IfModule>\n";
-	close $fh;
-	1;
-} 
-or do {
-	print "Error occurred while enabling SFTP in ProFTPd: $@\n";
-};
+#eval {
+#	print "Enabling SFTP on port 2222 in ProFTPd\n";
+#	my $fh;
+#	# This is crazy. Need to use Webmin to lookup location of proftpd.conf or conf.d,
+#	# but, it's not up to date or accurate for several systems, so need to fix.
+#	if ( -d '/etc/proftpd/conf.d' ) { open ($fh, '>', '/etc/proftpd/conf.d/sftpd.conf'); }
+#	elsif ( -f '/etc/proftd/proftpd.conf' ) { open ($fh, '>>', '/etc/proftpd/proftpd.conf'); }
+#	elsif ( -f '/etc/proftpd.conf' ) { open(my $fh, '>>', '/etc/proftpd.conf'); }
+#	elsif ( -f '/usr/local/etc/proftpd.conf' ) { open ($fh, '>>', '/usr/local/etc/proftpd.conf'); }
+#	else { die "Could not find a proftpd configuration to edit.\n"; }
+#	print $fh "\nLoadModule mod_sftp.c\n";
+#	print $fh "<IfModule mod_sftp.c>\n\n";
+#	print $fh "    SFTPEngine on\n";
+#	print $fh "    Port 2222\n";
+#	print $fh "    SFTPLog /var/log/proftpd/sftp.log\n\n";
+#	print $fh "    SFTPHostKey /etc/ssh/ssh_host_rsa_key\n";
+#	print $fh "    SFTPHostKey /etc/ssh/ssh_host_dsa_key\n\n";
+#	print $fh "    SFTPAuthorizedUserKeys file:~/.sftp/authorized_keys\n\n";
+#	print $fh "    SFTPCompression delayed\n\n";
+#	print $fh "</IfModule>\n";
+#	close $fh;
+#	1;
+#} 
+#or do {
+#	print "Error occurred while enabling SFTP in ProFTPd: $@\n";
+#};
 
 eval {
 	print "Enabling ProFTPd\n";
-	&init::enable_at_boot("proftpd");
-	&init::restart_action("proftpd");
+	init::enable_at_boot("proftpd");
+	init::restart_action("proftpd");
 	if ($gconfig{'os_type'} eq 'freebsd') {
 	# This directory is missing on FreeBSD
-		&make_dir("/var/run/proftpd", 0755);
+		make_dir("/var/run/proftpd", 0755);
 
 		# UseIPv6 doesn't work on FreeBSD
-		&foreign_require("proftpd", "proftpd-lib.pl");
-		$conf = &proftpd::get_config();
-		&proftpd::save_directive("UseIPv6", [ ], $conf, $conf);
-		&flush_file_lines();
+		foreign_require("proftpd", "proftpd-lib.pl");
+		my $conf = &proftpd::get_config();
+		proftpd::save_directive("UseIPv6", [ ], $conf, $conf);
+		flush_file_lines();
 	}
 	1;
 }
@@ -383,10 +388,11 @@ or do {
 # SASL SMTP authentication
 eval {
 	print "Enabling SMTP Authentication\n";
-	&init::enable_at_boot("saslauthd");
+	init::enable_at_boot("saslauthd");
+	my ($saslinit, $cf, $libdir);
 	if ($gconfig{'os_type'} eq "debian-linux" or $gconfig{'os_type'} eq "ubuntu-linux") {
 		my $fn="/etc/default/saslauthd";
-		$sasldefault = &read_file_lines($fn) or die "Failed to open $fn!";
+		my $sasldefault = &read_file_lines($fn) or die "Failed to open $fn!";
 		my $idx = &indexof("# START=yes", @$sasldefault);
 		if ($idx < 0) {
 			$idx = &indexof("START=no", @$sasldefault);
@@ -394,10 +400,7 @@ eval {
 		if ($idx >= 0) {
 			$sasldefault->[$idx]="START=yes";
 		}
-		# Debian 4 used OPTIONS instead of PARAMS
-		if ( $gconfig{'os_version'} =~ /^[4-9].*/ ) {
-			push(@$sasldefault, "OPTIONS=\"-m /var/spool/postfix/var/run/saslauthd -r\""); } else {
-				push(@$sasldefault, "PARAMS=\"-m /var/spool/postfix/var/run/saslauthd -r\""); }
+		push(@$sasldefault, "PARAMS=\"-m /var/spool/postfix/var/run/saslauthd -r\""); 
 		flush_file_lines($fn);
 		$cf="/etc/postfix/sasl/smtpd.conf";
 		system("mkdir -p -m 755 /var/spool/postfix/var/run/saslauthd");
@@ -412,7 +415,7 @@ eval {
 				$l = "MECHANISM=pam";
 			}
 		}
-		&flush_file_lines("/opt/csw/etc/saslauthd.init");
+		flush_file_lines("/opt/csw/etc/saslauthd.init");
 		$cf = "/opt/csw/lib/sasl2/smtpd.conf";
 		$saslinit = "/etc/init.d/cswsaslauthd";
 	}
@@ -434,16 +437,16 @@ eval {
 		if (! -e $cf ) {
 			system("touch $cf");
 		}
-		$smtpdconf= &read_file_lines($cf) or die "Failed to open $cf!";
-		$idx = &indexof("", @$smtpdconf);
+		my $smtpdconf= read_file_lines($cf) or die "Failed to open $cf!";
+		my $idx = indexof("", @$smtpdconf);
 		if ($idx < 0) {
 			push(@$smtpdconf, "pwcheck_method: saslauthd");
 			push(@$smtpdconf, "mech_list: plain login");
-			&flush_file_lines($cf);
+			flush_file_lines($cf);
 		}
 		#$cmd = "$saslinit start";
-		#&proc::safe_process_exec($cmd, 0, 0, STDOUT, undef, 1);
-		&init::start_action('saslauthd');
+		#proc::safe_process_exec($cmd, 0, 0, *STDOUT, undef, 1);
+		init::start_action('saslauthd');
 	}
 	1;
 }
@@ -454,7 +457,7 @@ or do {
 # Tell Virtualmin to use Postfix, and enable all features
 eval {
 	print "Configuring Virtualmin\n";
-	%vconfig = &foreign_config("virtual-server");
+	my %vconfig = &foreign_config("virtual-server");
 	$vconfig{'mail_system'} = 0;
 	$vconfig{'aliascopy'} = 1;
 	$vconfig{'home_base'} = "/home";
@@ -489,19 +492,20 @@ eval {
 		$vconfig{'html_perms'} = "0750";
 	}
 	$vconfig{'php_suexec'} = 2;
-	&save_module_config(\%vconfig, "virtual-server");
+	save_module_config(\%vconfig, "virtual-server");
 
 	# Configure the Read User Mail module to look for sub-folders
 	# under ~/Maildir
-	%mconfig = &foreign_config("mailboxes");
+	my %mconfig = foreign_config("mailboxes");
 	$mconfig{'mail_usermin'} = "Maildir";
 	$mconfig{'from_virtualmin'} = 1;
-	&save_module_config(\%mconfig, "mailboxes");
+	save_module_config(\%mconfig, "mailboxes");
 
 	# Setup the Usermin read mail module
-	$cfile = "$usermin::config{'usermin_dir'}/mailbox/config";
-	&read_file($cfile, \%mailconfig);
-	($map) = &postfix::get_maps_files(&postfix::get_real_value(
+	my $cfile = "$usermin::config{'usermin_dir'}/mailbox/config";
+	my %mailconfig;
+	read_file($cfile, \%mailconfig);
+	my ($map) = postfix::get_maps_files(postfix::get_real_value(
 				$postfix::virtual_maps));
 	$map ||= "/etc/postfix/virtual";
 	$mailconfig{'from_map'} = $map;
@@ -514,68 +518,76 @@ eval {
 	$mailconfig{'send_mode'} = 'localhost';
 	$mailconfig{'nologout'} = 1;
 	$mailconfig{'noindex_hostname'} = 1;
-	&write_file($cfile, \%mailconfig);
+	write_file($cfile, \%mailconfig);
 
 	# Set the mail folders subdir to Maildir
-	$ucfile = "$usermin::config{'usermin_dir'}/mailbox/uconfig";
-	&read_file($ucfile, \%umailconfig);
+	my $ucfile = "$usermin::config{'usermin_dir'}/mailbox/uconfig";
+	my %umailconfig;
+	read_file($ucfile, \%umailconfig);
 	$umailconfig{'mailbox_dir'} = 'Maildir';
-	&write_file($ucfile, \%umailconfig);
+	write_file($ucfile, \%umailconfig);
 
 	# Set the default Usermin ACL to only allow access to email modules
-	&usermin::save_usermin_acl("user",
+	usermin::save_usermin_acl("user",
 			[ "mailbox", "changepass", "spam", "filter" ]);
 
 	# Lock down the Usermin file manager and browser to users' homes
 	$cfile = "$usermin::config{'usermin_dir'}/file/config";
-	&read_file($cfile, \%fileconfig);
+	my %fileconfig;
+	read_file($cfile, \%fileconfig);
 	$fileconfig{'home_only'} = 1;
-	&write_file($cfile, \%fileconfig);
-	$afile = "$usermin::config{'usermin_dir'}/user.acl";
-	&read_file($afile, \%uacl);
+	write_file($cfile, \%fileconfig);
+	my $afile = "$usermin::config{'usermin_dir'}/user.acl";
+	my %uacl;
+	read_file($afile, \%uacl);
 	$uacl{'root'} = '';
-	&write_file($afile, \%uacl);
+	write_file($afile, \%uacl);
 
 	# Configure the Usermin Change Password module to use Virtualmin's
 	# change-password.pl script
 	$cfile = "$usermin::config{'usermin_dir'}/changepass/config";
-	&read_file($cfile, \%cpconfig);
+	my %cpconfig;
+	read_file($cfile, \%cpconfig);
 	$cpconfig{'passwd_cmd'} =
 		$config_directory eq "/etc/webmin" ?
 		"$root_directory/virtual-server/change-password.pl" :
 		"virtualmin change-password";
 	$cpconfig{'cmd_mode'} = 1;
-	&write_file($cfile, \%cpconfig);
+	write_file($cfile, \%cpconfig);
 
 	# Also do the same thing for expired password changes
 	$cfile = "$usermin::config{'usermin_dir'}/config";
-	&read_file($cfile, \%umconfig);
+	my %umconfig;
+	read_file($cfile, \%umconfig);
 	$umconfig{'passwd_cmd'} =
 		"$root_directory/virtual-server/change-password.pl";
-	&write_file($cfile, \%umconfig);
+	write_file($cfile, \%umconfig);
 
 	# Configure the Usermin Filter module to use the right path for
 	# Webmin config files. The defaults are incorrect on FreeBSD, where
 	# we install under /usr/local/etc/webmin
 	$cfile = "$usermin::config{'usermin_dir'}/filter/config";
-	&read_file($cfile, \%ficonfig);
+	my %ficonfig;
+	read_file($cfile, \%ficonfig);
 	$ficonfig{'virtualmin_config'} =
 		"$config_directory/virtual-server";
 	$ficonfig{'virtualmin_spam'} =
 		"$config_directory/virtual-server/lookup-domain.pl";
-	&write_file($cfile, \%ficonfig);
+	write_file($cfile, \%ficonfig);
 
 	# Same for Usermin custom commands
 	$cfile = "$usermin::config{'usermin_dir'}/commands/config";
-	&read_file($cfile, \%ccconfig);
+	my %ccconfig;
+	read_file($cfile, \%ccconfig);
 	$ccconfig{'webmin_config'} = "$config_directory/custom";
-	&write_file($cfile, \%ccconfig);
+	write_file($cfile, \%ccconfig);
 
 	# Same for Usermin .htaccess files
 	$cfile = "$usermin::config{'usermin_dir'}/htaccess/config";
-	&read_file($cfile, \%htconfig);
+	my %htconfig;
+	read_file($cfile, \%htconfig);
 	$htconfig{'webmin_apache'} = "$config_directory/apache";
-	&write_file($cfile, \%htconfig);
+	write_file($cfile, \%htconfig);
 
 	# Setup the Apache, BIND and DB modules to use tables for lists
 	foreach my $t ([ 'apache', 'show_list' ],
@@ -584,14 +596,14 @@ eval {
 			[ 'postgresql', 'style' ]) {
 		my %mconfig = &foreign_config($t->[0]);
 		$mconfig{$t->[1]} = 1;
-		&save_module_config(\%mconfig, $t->[0]);
+		save_module_config(\%mconfig, $t->[0]);
 	}
 
 	# Make the default home directory permissions 750
 	my %uconfig = &foreign_config("useradmin");
 	if ( $gconfig{'os_type'} eq 'freebsd' ) { $uconfig{'homedir_perms'} = "0751"; }
 	else { $uconfig{'homedir_perms'} = "0750"; }
-	&save_module_config(\%uconfig, "useradmin");
+	save_module_config(\%uconfig, "useradmin");
 	1;
 }
 or do {
@@ -602,9 +614,10 @@ or do {
 # Create a global Procmail rule to deliver to ~/Maildir/
 eval {
 	print "Configuring Procmail\n";
-	&foreign_require("procmail", "procmail-lib.pl");
-	my @recipes = &procmail::get_procmailrc();
-	foreach $r (@recipes) {
+	foreign_require("procmail", "procmail-lib.pl");
+	my @recipes = procmail::get_procmailrc();
+	my ($defrec, $orgrec);
+	foreach my $r (@recipes) {
 		if ($r->{'name'} eq "DEFAULT") {
 			$defrec = $r;
 		}
@@ -615,33 +628,33 @@ eval {
 	if ($defrec) {
 		# Fix up this DEFAULT entry
 		$defrec->{'value'} = '$HOME/Maildir/';
-		&procmail::modify_recipe($defrec);
+		procmail::modify_recipe($defrec);
 	}
 	else {
 		# Prepend a DEFAULT entry
 		$defrec = { 'name' => 'DEFAULT',
 			'value' => '$HOME/Maildir/' };
 		if (@recipes) {
-			&procmail::create_recipe_before($defrec, $recipes[0]);
+			procmail::create_recipe_before($defrec, $recipes[0]);
 		}
 		else {
-			&procmail::create_recipe($defrec);
+			procmail::create_recipe($defrec);
 		}
 	}
 	if ($orgrec) {
 		# Fix up this ORGMAIL entry
 		$orgrec->{'value'} = '$HOME/Maildir/';
-		&procmail::modify_recipe($orgrec);
+		procmail::modify_recipe($orgrec);
 	}
 	else {
 		# Prepend a ORGMAIL entry
 		$orgrec = { 'name' => 'ORGMAIL',
 			'value' => '$HOME/Maildir/' };
 		if (@recipes) {
-			&procmail::create_recipe_before($orgrec, $recipes[0]);
+			procmail::create_recipe_before($orgrec, $recipes[0]);
 		}
 		else {
-			&procmail::create_recipe($orgrec);
+			procmail::create_recipe($orgrec);
 		}
 	}
 	1;
@@ -651,7 +664,7 @@ or do {
 };
 
 # Disable Razor in spamassassin, as it causes SIGPIPE errors
-$razorfile = "/usr/local/etc/mail/spamassassin/v310.pre";
+my $razorfile = "/usr/local/etc/mail/spamassassin/v310.pre";
 if ($gconfig{'os_type'} eq 'freebsd' && -r $razorfile) {
 	eval {
 		print "Disabling Razor in SpamAssassin\n";
@@ -661,7 +674,7 @@ if ($gconfig{'os_type'} eq 'freebsd' && -r $razorfile) {
 				$l = "#$l";
 			}
 		}
-		&flush_file_lines($razorfile);
+		flush_file_lines($razorfile);
 		1;
 	}
 	or do {
@@ -673,11 +686,11 @@ if ($gconfig{'os_type'} eq 'freebsd' && -r $razorfile) {
 eval {
 	print "Configuring Webalizer\n";
 	&foreign_require("webalizer", "webalizer-lib.pl");
-	$conf = &webalizer::get_config();
-	&webalizer::save_directive($conf, "IncrementalName", "webalizer.current");
-	&webalizer::save_directive($conf, "HistoryName", "webalizer.hist");
-	&webalizer::save_directive($conf, "DNSCache", "dns_cache.db");
-	&flush_file_lines($webalizer::config{'webalizer_conf'});
+	my $conf = &webalizer::get_config();
+	webalizer::save_directive($conf, "IncrementalName", "webalizer.current");
+	webalizer::save_directive($conf, "HistoryName", "webalizer.hist");
+	webalizer::save_directive($conf, "DNSCache", "dns_cache.db");
+	flush_file_lines($webalizer::config{'webalizer_conf'});
 	1;
 }
 or do {
@@ -687,12 +700,12 @@ or do {
 # Add /bin/false to the shells file, for use by Virtualmin
 eval {
 	print "Updating /etc/shells\n";
-	$lref = &read_file_lines("/etc/shells");
-	$idx = &indexof("/bin/false", @$lref);
+	my $lref = &read_file_lines("/etc/shells");
+	my $idx = &indexof("/bin/false", @$lref);
 	if ($idx < 0) {
 		push(@$lref, "/bin/false");
 		push(@$lref, "/usr/bin/scponly");
-		&flush_file_lines("/etc/shells");
+		flush_file_lines("/etc/shells");
 	}
 	1;
 }
@@ -705,34 +718,34 @@ or do {
 eval {
 	print "Enabling MySQL and PostgreSQL\n";
 	if ($gconfig{'os_type'} eq "freebsd" ||
-			&init::action_status("mysql")) {
-		&init::enable_at_boot("mysql");
+			init::action_status("mysql")) {
+		init::enable_at_boot("mysql");
 	} else {
-		&init::enable_at_boot("mysqld");
+		init::enable_at_boot("mysqld");
 	}
-	&init::enable_at_boot("postgresql");
-	&foreign_require("mysql", "mysql-lib.pl");
-	if (&mysql::is_mysql_running()) {
-		&mysql::stop_mysql();
+	init::enable_at_boot("postgresql");
+	foreign_require("mysql", "mysql-lib.pl");
+	if (mysql::is_mysql_running()) {
+		mysql::stop_mysql();
 	}
-	$conf = &mysql::get_mysql_config();
-	($sect) = grep { $_->{'name'} eq 'mysqld' } @$conf;
+	my $conf = mysql::get_mysql_config();
+	my ($sect) = grep { $_->{'name'} eq 'mysqld' } @$conf;
 	if ($sect) {
-		&mysql::save_directive($conf, $sect,
+		mysql::save_directive($conf, $sect,
 				"innodb_file_per_table", [ 1 ]);
-		&flush_file_lines($sect->{'file'});
+		flush_file_lines($sect->{'file'});
 	}
-	$err = &mysql::start_mysql();
+	my $err = mysql::start_mysql();
 	print STDERR "Failed to start MySQL!\n" if ($err);
-	if (&foreign_check("postgresql")) {
-		&foreign_require("postgresql", "postgresql-lib.pl");
+	if (foreign_check("postgresql")) {
+		foreign_require("postgresql", "postgresql-lib.pl");
 		if (!-r $postgresql::config{'hba_conf'}) {
 			# Needs to be initialized
-			$err = &postgresql::setup_postgresql();
+			my $err = postgresql::setup_postgresql();
 			print STDERR "Failed to setup PostgreSQL!\n" if ($err);
 		}
-		if (&postgresql::is_postgresql_running() == 0) {
-			$err = &postgresql::start_postgresql();
+		if (postgresql::is_postgresql_running() == 0) {
+			my $err = postgresql::start_postgresql();
 			print STDERR "Failed to start PostgreSQL!\n" if ($err);
 		}
 	}
@@ -769,13 +782,13 @@ eval {
 		}
 		if (-e "/etc/init.d/apache") {
 			print "Shutting down Apache 1.3, if running\n";
-			$cmd = "/etc/init.d/apache stop";
+			my $cmd = "/etc/init.d/apache stop";
 			foreign_require("proc", "proc-lib.pl");
-			proc::safe_process_exec($cmd, 0, 0, STDOUT, undef, 1);
+			proc::safe_process_exec($cmd, 0, 0, *STDOUT, undef, 1);
 		}
-		$fn="/etc/default/apache2";
-		$apache2default = read_file_lines($fn) or die "Failed to open $fn!";
-		$idx = indexof("NO_START=1");
+		my $fn="/etc/default/apache2";
+		my $apache2default = read_file_lines($fn) or die "Failed to open $fn!";
+		my $idx = indexof("NO_START=1");
 		$apache2default->[$idx]="NO_START=0";
 		flush_file_lines($fn);
 	}
@@ -810,7 +823,7 @@ eval {
 			(( $gconfig{'real_os_type'} eq 'Ubuntu Linux' ) &&
 			 ( $gconfig{'real_os_version'} >= 10.04))) {
 		my $fn = "/etc/apache2/suexec/www-data";
-		$apache2suexec = read_file_lines($fn) or die "Failed to open $fn!";
+		my $apache2suexec = read_file_lines($fn) or die "Failed to open $fn!";
 		$apache2suexec->[0] = "/home";
 		flush_file_lines($fn);
 	}
@@ -844,12 +857,12 @@ eval {
 		}
 		flush_file_lines($fn);
 		# Load mod_fcgid
-		open(FCGID, ">/usr/local/etc/apache22/Includes/fcgid.conf");
-		print FCGID "LoadModule fcgid_module libexec/apache22/mod_fcgid.so\n";
-		print FCGID "<IfModule mod_fcgid.c>\n";
-		print FCGID "  AddHandler fcgid-script .fcgi\n";
-		print FCGID "</IfModule>\n";
-		close(FCGID);
+		open(my $FCGID, ">/usr/local/etc/apache22/Includes/fcgid.conf");
+		print $FCGID "LoadModule fcgid_module libexec/apache22/mod_fcgid.so\n";
+		print $FCGID "<IfModule mod_fcgid.c>\n";
+		print $FCGID "  AddHandler fcgid-script .fcgi\n";
+		print $FCGID "</IfModule>\n";
+		close($FCGID);
 	}
 
 	# Comment out config files that conflict
@@ -862,35 +875,35 @@ eval {
 				$l = "#".$l;
 			}
 		}
-		&flush_file_lines($file);
+		flush_file_lines($file);
 	}
 
 	# Disable global UserDir option
-	$conf = &apache::get_config();
-	($userdir) = &apache::find_directive_struct("UserDir", $conf);
+	my $conf = apache::get_config();
+	my ($userdir) = apache::find_directive_struct("UserDir", $conf);
 	if ($userdir) {
-		&apache::save_directive("UserDir", [ ], $conf, $conf);
-		&flush_file_lines($userdir->{'file'});
+		apache::save_directive("UserDir", [ ], $conf, $conf);
+		flush_file_lines($userdir->{'file'});
 	}
 
 	# Force use of PCI-compliant SSL ciphers
 	foreign_require("webmin", "webmin-lib.pl");
-	&apache::save_directive("SSLProtocol",
+	apache::save_directive("SSLProtocol",
 			[ "ALL -SSLv2 -SSLv3" ], $conf, $conf);
-	if (!&apache::find_directive("SSLCipherSuite", $conf)) {
-		&apache::save_directive("SSLCipherSuite",
+	if (!apache::find_directive("SSLCipherSuite", $conf)) {
+		apache::save_directive("SSLCipherSuite",
 				[ "HIGH:!SSLv2:!ADH:!aNULL:!eNULL:!NULL" ],
 				$conf, $conf);
 	}
 
 	# Turn off server signatures, which aren't PCI compliant
-	&apache::save_directive("ServerTokens", [ "Minimal" ], $conf, $conf);
-	&apache::save_directive("ServerSignature", [ "Off" ], $conf, $conf);
-	&apache::save_directive("TraceEnable", [ "Off" ], $conf, $conf);
-	&flush_file_lines();
+	apache::save_directive("ServerTokens", [ "Minimal" ], $conf, $conf);
+	apache::save_directive("ServerSignature", [ "Off" ], $conf, $conf);
+	apache::save_directive("TraceEnable", [ "Off" ], $conf, $conf);
+	flush_file_lines();
 
-	if (!&apache::is_apache_running()) {
-		$err = &apache::start_apache();
+	if (!apache::is_apache_running()) {
+		my $err = apache::start_apache();
 		print STDERR "Failed to start Apache!\n" if ($err);
 	}
 
@@ -905,70 +918,71 @@ or do {
 # Enable BIND at boot time, start it now, and setup initial config file
 eval {
 	print "Configuring and enabling BIND\n";
-	if (&init::action_status("named")) {
-		&init::enable_at_boot("named");
+	if (init::action_status("named")) {
+		init::enable_at_boot("named");
 	}
-	elsif (&init::action_status("bind9")) {
-		&init::enable_at_boot("bind9");
+	elsif (init::action_status("bind9")) {
+		init::enable_at_boot("bind9");
 	}
-	&foreign_require("bind8", "bind8-lib.pl");
-	$conffile = &bind8::make_chroot($bind8::config{'named_conf'});
+	foreign_require("bind8", "bind8-lib.pl");
+	my $conffile = bind8::make_chroot($bind8::config{'named_conf'});
 	if (!-r $conffile) {
 		$bind8::config{'named_conf'} =~ /^(\S+)\/([^\/]+)$/;
-		$conf_directory = $1;
-		$pid_file = $bind8::config{'pid_file'} || "/var/run/named.pid";
+		my $conf_directory = $1;
+		my $pid_file = $bind8::config{'pid_file'} || "/var/run/named.pid";
+		my $pid_dir;
 
 		# Make sure all directories used by BIND exist
-		$chroot = &bind8::get_chroot();
+		my $chroot = bind8::get_chroot();
 		if ($chroot && !-d $chroot) {
 			mkdir($chroot, 0755);
 		}
-		if (!-d &bind8::make_chroot($conf_directory)) {
-			mkdir(&bind8::make_chroot($conf_directory), 0755);
+		if (!-d bind8::make_chroot($conf_directory)) {
+			mkdir(bind8::make_chroot($conf_directory), 0755);
 		}
 		if ($bind8::config{'master_dir'} &&
-				!-d &bind8::make_chroot($bind8::config{'master_dir'})) {
-			mkdir(&bind8::make_chroot($bind8::config{'master_dir'}), 0755);
+				!-d bind8::make_chroot($bind8::config{'master_dir'})) {
+			mkdir(bind8::make_chroot($bind8::config{'master_dir'}), 0755);
 		}
 		if ($bind8::config{'slave_dir'} &&
-				!-d &bind8::make_chroot($bind8::config{'slave_dir'})) {
-			mkdir(&bind8::make_chroot($bind8::config{'slave_dir'}), 0777);
+				!-d bind8::make_chroot($bind8::config{'slave_dir'})) {
+			mkdir(bind8::make_chroot($bind8::config{'slave_dir'}), 0777);
 		}
 		if ($pid_file =~ /^(.*)\//) {
 			$pid_dir = $1;
-		if (!-d &bind8::make_chroot($pid_dir)) {
-			mkdir(&bind8::make_chroot($pid_dir), 0777);
+		if (!-d bind8::make_chroot($pid_dir)) {
+			mkdir(bind8::make_chroot($pid_dir), 0777);
 		}
 	}
 
 	# Need to setup named.conf file, with root zone
-	open(BOOT, ">$conffile");
-	print BOOT "options {\n";
-	print BOOT "    directory \"$conf_directory\";\n";
-	print BOOT "    pid-file \"$pid_file\";\n";
-	print BOOT "    allow-recursion { localnets; 127.0.0.1; };\n";
-	print BOOT "    };\n";
-	print BOOT "\n";
-	print BOOT "zone \".\" {\n";
-	print BOOT "    type hint;\n";
-	print BOOT "    file \"$conf_directory/db.cache\";\n";
-	print BOOT "    };\n";
-	print BOOT "\n";
-	close(BOOT);
+	open(my $BOOT, ">", "$conffile");
+	print $BOOT "options {\n";
+	print $BOOT "    directory \"$conf_directory\";\n";
+	print $BOOT "    pid-file \"$pid_file\";\n";
+	print $BOOT "    allow-recursion { localnets; 127.0.0.1; };\n";
+	print $BOOT "    };\n";
+	print $BOOT "\n";
+	print $BOOT "zone \".\" {\n";
+	print $BOOT "    type hint;\n";
+	print $BOOT "    file \"$conf_directory/db.cache\";\n";
+	print $BOOT "    };\n";
+	print $BOOT "\n";
+	close($BOOT);
 	system("cp $root_directory/bind8/db.cache ".
-			&bind8::make_chroot("$conf_directory/db.cache"));
-	&bind8::set_ownership(&bind8::make_chroot("$conf_directory/db.cache"));
-	&bind8::set_ownership($conffile);
+			bind8::make_chroot("$conf_directory/db.cache"));
+	bind8::set_ownership(bind8::make_chroot("$conf_directory/db.cache"));
+	bind8::set_ownership($conffile);
 	}
 
 	# Remove any options that would make BIND listen on localhost only
 	undef(@bind8::get_config_cache);
-	$conf = &bind8::get_config();
-	$options = &bind8::find("options", $conf);
+	my $conf = bind8::get_config();
+	my $options = &bind8::find("options", $conf);
 	if ($options) {
-		&bind8::save_directive($options, "allow-query", [ ], 0);
+		bind8::save_directive($options, "allow-query", [ ], 0);
 		foreach my $dir ("listen-on", "listen-on-v6") {
-			@listen = &bind8::find($dir, $options->{'members'});
+			my @listen = bind8::find($dir, $options->{'members'});
 			next if (!@listen);
 			if ($listen[0]->{'values'}->[0] eq 'port' &&
 					$listen[0]->{'values'}->[1] eq '53' &&
@@ -978,16 +992,16 @@ eval {
 					 $listen[0]->{'members'}->[0]->{'name'} eq '::1')) {
 				$listen[0]->{'members'}->[0]->{'name'} = 'any';
 			}
-			&bind8::save_directive($options, $dir, \@listen, 1);
+			bind8::save_directive($options, $dir, \@listen, 1);
 		}
-		&bind8::flush_file_lines();
+		bind8::flush_file_lines();
 	}
 
-	if (!&bind8::is_bind_running()) {
-		&bind8::start_bind();
+	if (!bind8::is_bind_running()) {
+		bind8::start_bind();
 	}
 	else {
-		&bind8::restart_bind();
+		bind8::restart_bind();
 	}
 	1;
 }
@@ -997,18 +1011,18 @@ or do {
 
 # Make sure the system is configured to use itself as a resolver
 eval {
-	if (&foreign_check("net")) {
+	if (foreign_check("net")) {
 		print "Configuring resolv.conf to use my DNS server\n";
-		&foreign_require("net", "net-lib.pl");
-		my $dns = &net::get_dns_config();
-		if (&indexof("127.0.0.1", @{$dns->{'nameserver'}}) < 0) {
+		foreign_require("net", "net-lib.pl");
+		my $dns = net::get_dns_config();
+		if (indexof("127.0.0.1", @{$dns->{'nameserver'}}) < 0) {
 			unshift(@{$dns->{'nameserver'}}, "127.0.0.1");
-			&net::save_dns_config($dns);
+			net::save_dns_config($dns);
 		}
 		# Restart Postfix so that it picks up the new resolv.conf
-		&foreign_require("virtual-server");
-		&virtual_server::stop_service_mail();
-		&virtual_server::start_service_mail();
+		foreign_require("virtual-server");
+		virtual_server::stop_service_mail();
+		virtual_server::start_service_mail();
 	}
 	1;
 }
@@ -1018,14 +1032,14 @@ or do {
 
 # Create 'mailman' list
 eval {
-	if (&foreign_installed("virtualmin-mailman")) {
-		&foreign_require("virtualmin-mailman",
+	if (foreign_installed("virtualmin-mailman")) {
+		foreign_require("virtualmin-mailman",
 				"virtualmin-mailman-lib.pl");
-		my @lists = &virtualmin_mailman::list_lists();
+		my @lists = virtualmin_mailman::list_lists();
 		my ($mlist) = grep { $_->{'list'} eq 'mailman' } @lists;
 		if (!$mlist) {
 			# Need to create
-			&virtualmin_mailman::create_list("mailman", undef,
+			virtualmin_mailman::create_list("mailman", undef,
 					"Default mailing list",
 					undef,
 					"root\@".&get_system_hostname(),
@@ -1041,12 +1055,12 @@ or do {
 # Enable scheduled monitoring
 eval {
 	print "Enabling status monitoring\n";
-	&foreign_require("status", "status-lib.pl");
+	foreign_require("status", "status-lib.pl");
 	$status::config{'sched_mode'} = 1;
 	$status::config{'sched_int'} ||= 5;
 	$status::config{'sched_offset'} ||= 0;
-	&save_module_config(\%status::config, 'status');
-	&status::setup_cron_job();
+	save_module_config(\%status::config, 'status');
+	status::setup_cron_job();
 	1;
 }
 or do {
@@ -1059,9 +1073,9 @@ if ($gconfig{'os_type'} eq 'debian-linux') {
 	eval {
 		print "Hiding the Webmin and Usermin upgrade pages\n";
 		my %wacl = ( 'disallow' => 'upgrade' );
-		&save_module_acl(\%wacl, 'root', 'webmin');
+		save_module_acl(\%wacl, 'root', 'webmin');
 		my %uacl = ( 'upgrade' => 0 );
-		&save_module_acl(\%uacl, 'root', 'usermin');
+		save_module_acl(\%uacl, 'root', 'usermin');
 		1;
 	}
 	or do {
@@ -1072,11 +1086,11 @@ if ($gconfig{'os_type'} eq 'debian-linux') {
 # Find the filesystem containing /home , and enable quotas on it
 eval {
 	print STDERR "Enabling quotas on filesystem for /home\n";
-	&foreign_require("mount", "mount-lib.pl");
+	foreign_require("mount", "mount-lib.pl");
 	mkdir("/home", 0755) if (!-d "/home");
-	($dir, $dev, $type, $opts) = &mount::filesystem_for_dir("/home");
-	&mount::parse_options($type, $opts);
-	if (&running_in_zone() || &running_in_vserver()) {
+	my ($dir, $dev, $type, $opts) = mount::filesystem_for_dir("/home");
+	mount::parse_options($type, $opts);
+	if (running_in_zone() || &running_in_vserver()) {
 		print STDERR "Skipping quotas for Vserver or Zones systems\n";
 		return;
 	}
@@ -1103,25 +1117,26 @@ eval {
 	else {
 		print STDERR "Don't know how to enable quotas on $gconfig{'real_os_type'} ($gconfig{'os_type'})\n";
 	}
-	$opts = &mount::join_options($type);
-	@mounts = &mount::list_mounts();
+	$opts = mount::join_options($type);
+	my @mounts = mount::list_mounts();
+	my $idx;
 	for($idx=0; $idx<@mounts; $idx++) {
 		last if ($mounts[$idx]->[0] eq $dir);
 	}
-	&mount::change_mount($idx, $mounts[$idx]->[0],
+	mount::change_mount($idx, $mounts[$idx]->[0],
 			$mounts[$idx]->[1],
 			$mounts[$idx]->[2],
 			$opts,
 			$mounts[$idx]->[4],
 			$mounts[$idx]->[5]);
-	$err = &mount::remount_dir($dir, $dev, $type, $opts);
+	my $err = mount::remount_dir($dir, $dev, $type, $opts);
 	if ($err) {
 		print STDERR "The filesystem $dir could not be remounted with quotas enabled. You may need to reboot your system, and then enable quotas in the Disk Quotas module.\n";
 	}
 	else {
 # Activate quotas
-		&foreign_require("quota", "quota-lib.pl");
-		&quota::quotaon($dir, 3);
+		foreign_require("quota", "quota-lib.pl");
+		quota::quotaon($dir, 3);
 	}
 	1;
 }
@@ -1130,81 +1145,48 @@ or do {
 };
 
 eval {
-	@tcpports = qw(ssh smtp submission domain ftp ftp-data pop3 pop3s imap imaps http https 2222 10000 20000);
-	@udpports = qw(domain);
+	my @tcpports = qw(ssh smtp submission domain ftp ftp-data pop3 pop3s imap imaps http https 2222 10000 20000);
+	my @udpports = qw(domain);
 	if ($gconfig{'os_type'} =~ /-linux$/) {
 		print "Configuring firewall rules\n";
 	}
-	$fn="/etc/sysconfig/SuSEfirewall2";
-	if ( -e "$fn" ) {
-		# Do one thing for SUSE (Why, oh, why SUSE!?  Doing something oddball when there's 
-		# a good and standard solution that everyone else uses is just stupid.)
-		$susefirewall = read_file_lines($fn) or die "Failed to open $fn!";
-		for($i=0; $i<@$susefirewall; $i++) {
-			if ( $susefirewall->[$i] =~ m/^FW_SERVICES_EXT_TCP.*/ ) {
-				foreach (@tcpports) {
-					unless ( $susefirewall->[$i] =~ m/$_/ ) {
-						print "  Allowing TCP port: $_\n";
-						if ( $susefirewall->[$i]=~m/^FW_SERVICES_EXT_TCP=""$/ ) {
-							$susefirewall->[$i]="FW_SERVICES_EXT_TCP=\"$_\"";
-						} else {
-							$susefirewall->[$i]=~s/^FW_SERVICES_EXT_TCP="(.*)"$/FW_SERVICES_EXT_TCP="$1 $_"/;
-						}
-					}
-				}
-			} elsif ( $susefirewall->[$i] =~ m/^FW_SERVICES_EXT_UDP.*/ ) {
-				foreach (@udpports) {
-					unless ( $susefirewall->[$i] =~ m/$_/ ) {
-						print "  Allowing UDP port: $_\n";
-						if ( $susefirewall->[$i]=~m/^FW_SERVICES_EXT_UDP=""$/ ) {
-							$susefirewall->[$i]="FW_SERVICES_EXT_UDP=\"$_\"";
-						} else {
-							$susefirewall->[$i]=~s/^FW_SERVICES_EXT_UDP="(.*)"$/FW_SERVICES_EXT_UDP="$1 $_"/;
-						}
-					}
-				}
-			}
+	# And another thing (the Right Thing) for RHEL/CentOS/Fedora/Mandriva/Debian/Ubuntu
+	foreign_require("firewall", "firewall-lib.pl");
+	my @tables = &firewall::get_iptables_save();
+	my @allrules = map { @{$_->{'rules'}} } @tables; 
+	if (@allrules) {
+		my ($filter) = grep { $_->{'name'} eq 'filter' } @tables;
+		if (!$filter) {
+			$filter = { 'name' => 'filter',
+				'rules' => [ ],
+				'defaults' => { 'INPUT' => 'ACCEPT',
+					'OUTPUT' => 'ACCEPT',
+					'FORWARD' => 'ACCEPT' } };
 		}
-		flush_file_lines($fn);
-	} elsif (&foreign_check("firewall")) {
-# And another thing (the Right Thing) for RHEL/CentOS/Fedora/Mandriva/Debian/Ubuntu
-		&foreign_require("firewall", "firewall-lib.pl");
-		@tables = &firewall::get_iptables_save();
-		@allrules = map { @{$_->{'rules'}} } @tables; 
-		if (@allrules) {
-			($filter) = grep { $_->{'name'} eq 'filter' } @tables;
-			if (!$filter) {
-				$filter = { 'name' => 'filter',
-					'rules' => [ ],
-					'defaults' => { 'INPUT' => 'ACCEPT',
-						'OUTPUT' => 'ACCEPT',
-						'FORWARD' => 'ACCEPT' } };
-			}
-			foreach ( @tcpports ) {
-				print "  Allowing traffic on TCP port: $_\n";
-				$newrule = { 'chain' => 'INPUT',
-					'm' => [ [ '', 'tcp' ] ],
-					'p' => [ [ '', 'tcp' ] ],
-					'dport' => [ [ '', $_ ] ],
-					'j' => [ [ '', 'ACCEPT' ] ],
-				};
-				splice(@{$filter->{'rules'}}, 0, 0, $newrule);
-			}
-			foreach ( @udpports ) {
-				print "  Allowing traffic on UDP port: $_\n";
-				$newrule = { 'chain' => 'INPUT',
-					'm' => [ [ '', 'udp' ] ],
-					'p' => [ [ '', 'udp' ] ],
-					'dport' => [ [ '', $_ ] ],
-					'j' => [ [ '', 'ACCEPT' ] ],
-				};
-				splice(@{$filter->{'rules'}}, 0, 0, $newrule);
-			}
-			&firewall::save_table($filter);
-			&firewall::apply_configuration();
+		foreach ( @tcpports ) {
+			print "  Allowing traffic on TCP port: $_\n";
+			my $newrule = { 'chain' => 'INPUT',
+				'm' => [ [ '', 'tcp' ] ],
+				'p' => [ [ '', 'tcp' ] ],
+				'dport' => [ [ '', $_ ] ],
+				'j' => [ [ '', 'ACCEPT' ] ],
+			};
+			splice(@{$filter->{'rules'}}, 0, 0, $newrule);
 		}
+		foreach ( @udpports ) {
+			print "  Allowing traffic on UDP port: $_\n";
+			my $newrule = { 'chain' => 'INPUT',
+				'm' => [ [ '', 'udp' ] ],
+				'p' => [ [ '', 'udp' ] ],
+				'dport' => [ [ '', $_ ] ],
+				'j' => [ [ '', 'ACCEPT' ] ],
+			};
+			splice(@{$filter->{'rules'}}, 0, 0, $newrule);
+		}
+		firewall::save_table($filter);
+		firewall::apply_configuration();
 	}
-	1;
+1;
 }
 or do {
 	print "Error occurred while configuring firewall rules: $@\n";
@@ -1213,7 +1195,7 @@ or do {
 # Remove global awstats cron job from ubuntu, as we setup one per domain
 eval {
 	print "Removing default AWstats cron job\n";
-	&foreign_require("cron");
+	foreign_require("cron");
 	my @jobs = &cron::list_cron_jobs();
 	my @dis = grep { $_->{'command'} =~ /\/usr\/share\/awstats\/tools\/(update|buildstatic).sh/ && $_->{'active'} } @jobs;
 	if (@dis) {
@@ -1239,8 +1221,8 @@ if (&has_command("ntpdate-debian")) {
 # Force re-detection of supported modules
 eval {
 	print "Re-checking supported Webmin modules\n";
-	&foreign_require("webmin", "webmin-lib.pl");
-	&webmin::build_installed_modules(1);
+	foreign_require("webmin", "webmin-lib.pl");
+	webmin::build_installed_modules(1);
 	1;
 }
 or do {
